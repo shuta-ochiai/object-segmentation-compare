@@ -1,0 +1,6 @@
+ultralytics>=8.3.237
+pycocotools
+huggingface_hub
+pandas
+matplotlib
+Pillow
