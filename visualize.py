@@ -27,11 +27,15 @@ COLORS = {
 # One representative size per family (+SAM3.1) to keep the qualitative PDF readable;
 # see accuracy_comparison.png / speed_comparison.png for the full size sweep.
 QUALITATIVE_MODELS = [
-    ("YOLO26-seg (n)", "yolo26n"),
+    ("YOLO26-seg (m)", "yolo26m"),
     ("SAM3.1", "sam31"),
-    ("RF-DETR-Seg (Nano)", "rfdetrnano"),
+    ("RF-DETR-Seg (Medium)", "rfdetrmedium"),
 ]
 ROWS_PER_PAGE = 5
+# accuracy_*_predictions.json is generated at EVAL_CONF=0.001 (benchmark_accuracy.py)
+# for standard COCO mAP scoring, which is far too noisy to look at directly — filter
+# down to a realistic serving-style confidence for the overlay images.
+QUALITATIVE_MIN_SCORE = 0.25
 
 
 def plot_speed(df: pd.DataFrame) -> None:
@@ -99,6 +103,8 @@ def plot_qualitative_examples() -> None:
             return
         by_image: dict[int, list[dict]] = {}
         for p in json.loads(path.read_text()):
+            if p["score"] < QUALITATIVE_MIN_SCORE:
+                continue
             by_image.setdefault(p["image_id"], []).append(p)
         preds_by_image[name] = by_image
 
