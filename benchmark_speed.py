@@ -1,14 +1,15 @@
-"""Measure per-image latency, throughput, and peak VRAM for YOLO26-seg and SAM3.1."""
+"""Measure per-image latency, throughput, and peak VRAM for YOLO26-seg, SAM3.1, and RF-DETR-Seg."""
 
 import json
 import time
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 
-from models import SAM3_CHECKPOINT, YOLO_CHECKPOINT
+from models import CHECKPOINT_DIR, SAM3_CHECKPOINT
 
 DATA_DIR = Path(__file__).parent / "data"
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -43,10 +44,10 @@ def _timed_predict(predict_fn, image_paths, n_warmup: int = N_WARMUP) -> dict:
     }
 
 
-def benchmark_yolo(image_paths: list[Path]) -> dict:
+def benchmark_yolo(image_paths: list[Path], weights: Path) -> dict:
     from ultralytics import YOLO
 
-    model = YOLO(str(YOLO_CHECKPOINT))
+    model = YOLO(str(weights))
 
     def predict_fn(img_path: Path):
         model.predict(source=str(img_path), verbose=False, retina_masks=True)
@@ -95,6 +96,36 @@ def benchmark_sam31(image_paths: list[Path]) -> dict:
     return _timed_predict(predict_fn, image_paths)
 
 
+def benchmark_rfdetr(image_paths: list[Path], model_size: str = "Nano") -> dict:
+    import cv2
+    import rfdetr
+
+    # Deliberately left at default fp32/eager mode (no model.inference(compile=True,
+    # dtype=torch.float16) JIT+fp16 optimization) so all models are timed under
+    # equivalent out-of-the-box conditions; RF-DETR would likely be faster still
+    # with that optimization enabled.
+    model_cls = getattr(rfdetr, f"RFDETRSeg{model_size}")
+    model = model_cls()
+
+    def predict_fn(img_path: Path):
+        image = cv2.imread(str(img_path))
+        model.predict(image, threshold=0.25)
+
+    return _timed_predict(predict_fn, image_paths)
+
+
+# (display name, benchmark function taking image_paths)
+MODELS = [
+    ("YOLO26-seg (n)", partial(benchmark_yolo, weights=CHECKPOINT_DIR / "yolo26n-seg.pt")),
+    ("YOLO26-seg (m)", partial(benchmark_yolo, weights=CHECKPOINT_DIR / "yolo26m-seg.pt")),
+    ("YOLO26-seg (x)", partial(benchmark_yolo, weights=CHECKPOINT_DIR / "yolo26x-seg.pt")),
+    ("SAM3.1", benchmark_sam31),
+    ("RF-DETR-Seg (Nano)", partial(benchmark_rfdetr, model_size="Nano")),
+    ("RF-DETR-Seg (Medium)", partial(benchmark_rfdetr, model_size="Medium")),
+    ("RF-DETR-Seg (Large)", partial(benchmark_rfdetr, model_size="Large")),
+]
+
+
 def main() -> None:
     RESULTS_DIR.mkdir(exist_ok=True)
     image_paths = sorted(IMAGE_DIR.glob("*.jpg"))
@@ -103,13 +134,12 @@ def main() -> None:
 
     print(f"benchmarking on {len(image_paths)} images")
 
-    print("benchmarking YOLO26-seg...")
-    yolo_stats = benchmark_yolo(image_paths)
+    rows = []
+    for name, bench_fn in MODELS:
+        print(f"benchmarking {name}...")
+        rows.append({"model": name, **bench_fn(image_paths)})
 
-    print("benchmarking SAM3.1...")
-    sam_stats = benchmark_sam31(image_paths)
-
-    summary = pd.DataFrame([{"model": "YOLO26-seg", **yolo_stats}, {"model": "SAM3.1", **sam_stats}])
+    summary = pd.DataFrame(rows)
     summary.to_csv(RESULTS_DIR / "speed_summary.csv", index=False)
     print(summary.to_string(index=False))
 

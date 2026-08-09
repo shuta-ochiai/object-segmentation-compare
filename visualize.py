@@ -7,27 +7,50 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pycocotools.mask as mask_utils
+from matplotlib.backends.backend_pdf import PdfPages
 from PIL import Image
 
 RESULTS_DIR = Path(__file__).parent / "results"
 DATA_DIR = Path(__file__).parent / "data"
 IMAGE_DIR = DATA_DIR / "subset_accuracy"
 
-COLORS = {"YOLO26-seg": "#4C72B0", "SAM3.1": "#DD8452"}
-N_QUALITATIVE_EXAMPLES = 4
+COLORS = {
+    "YOLO26-seg (n)": "#4C72B0",
+    "YOLO26-seg (m)": "#7A9FC9",
+    "YOLO26-seg (x)": "#A9C2DF",
+    "SAM3.1": "#DD8452",
+    "RF-DETR-Seg (Nano)": "#55A868",
+    "RF-DETR-Seg (Medium)": "#89BF9B",
+    "RF-DETR-Seg (Large)": "#B8DBC3",
+}
+# (display name, slug matching results/accuracy_<slug>_predictions.json)
+# One representative size per family (+SAM3.1) to keep the qualitative PDF readable;
+# see accuracy_comparison.png / speed_comparison.png for the full size sweep.
+QUALITATIVE_MODELS = [
+    ("YOLO26-seg (n)", "yolo26n"),
+    ("SAM3.1", "sam31"),
+    ("RF-DETR-Seg (Nano)", "rfdetrnano"),
+]
+ROWS_PER_PAGE = 5
 
 
 def plot_speed(df: pd.DataFrame) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    fig, axes = plt.subplots(1, 2, figsize=(4 + 1.1 * len(df), 5))
 
     axes[0].bar(df["model"], df["mean_latency_s"], color=[COLORS[m] for m in df["model"]])
     axes[0].set_ylabel("mean latency (s, log scale)")
     axes[0].set_yscale("log")
     axes[0].set_title("Inference latency")
+    axes[0].tick_params(axis="x", rotation=45)
+    for label in axes[0].get_xticklabels():
+        label.set_horizontalalignment("right")
 
     axes[1].bar(df["model"], df["peak_vram_gb"], color=[COLORS[m] for m in df["model"]])
     axes[1].set_ylabel("peak VRAM (GB)")
     axes[1].set_title("Peak GPU memory")
+    axes[1].tick_params(axis="x", rotation=45)
+    for label in axes[1].get_xticklabels():
+        label.set_horizontalalignment("right")
 
     fig.tight_layout()
     fig.savefig(RESULTS_DIR / "speed_comparison.png", dpi=150)
@@ -37,12 +60,14 @@ def plot_speed(df: pd.DataFrame) -> None:
 def plot_accuracy(df: pd.DataFrame) -> None:
     metrics = ["AP", "AP50", "AP75", "AR"]
     x = np.arange(len(metrics))
-    width = 0.35
+    n_models = len(df["model"])
+    width = 0.8 / n_models
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig, ax = plt.subplots(figsize=(8, 4))
     for i, model in enumerate(df["model"]):
         values = df.loc[df["model"] == model, metrics].values.flatten()
-        ax.bar(x + (i - 0.5) * width, values, width, label=model, color=COLORS[model])
+        offset = (i - (n_models - 1) / 2) * width
+        ax.bar(x + offset, values, width, label=model, color=COLORS[model])
 
     ax.set_xticks(x)
     ax.set_xticklabels(metrics)
@@ -66,44 +91,50 @@ def _overlay_masks(image: np.ndarray, predictions: list[dict]) -> np.ndarray:
 
 
 def plot_qualitative_examples() -> None:
-    yolo_path = RESULTS_DIR / "accuracy_yolo26_predictions.json"
-    sam_path = RESULTS_DIR / "accuracy_sam31_predictions.json"
-    if not (yolo_path.exists() and sam_path.exists()):
-        print("skip qualitative overlays: run benchmark_accuracy.py first")
-        return
+    preds_by_image: dict[str, dict[int, list[dict]]] = {}
+    for name, slug in QUALITATIVE_MODELS:
+        path = RESULTS_DIR / f"accuracy_{slug}_predictions.json"
+        if not path.exists():
+            print(f"skip qualitative overlays: {path} not found (run benchmark_accuracy.py first)")
+            return
+        by_image: dict[int, list[dict]] = {}
+        for p in json.loads(path.read_text()):
+            by_image.setdefault(p["image_id"], []).append(p)
+        preds_by_image[name] = by_image
 
-    yolo_preds = json.loads(yolo_path.read_text())
-    sam_preds = json.loads(sam_path.read_text())
-
-    image_ids = sorted({p["image_id"] for p in yolo_preds} & {p["image_id"] for p in sam_preds})
-    image_ids = image_ids[:N_QUALITATIVE_EXAMPLES]
+    image_ids = sorted(set.intersection(*(set(d) for d in preds_by_image.values())))
     if not image_ids:
         print("skip qualitative overlays: no overlapping image_ids between predictions")
         return
 
-    fig, axes = plt.subplots(len(image_ids), 2, figsize=(8, 4 * len(image_ids)))
-    if len(image_ids) == 1:
-        axes = axes[np.newaxis, :]
+    n_cols = 1 + len(QUALITATIVE_MODELS)  # input image + one column per model
+    out_path = RESULTS_DIR / "qualitative_examples.pdf"
+    with PdfPages(out_path) as pdf:
+        for page_start in range(0, len(image_ids), ROWS_PER_PAGE):
+            page_ids = image_ids[page_start : page_start + ROWS_PER_PAGE]
 
-    for row, image_id in enumerate(image_ids):
-        img_path = IMAGE_DIR / f"{image_id:012d}.jpg"
-        image = np.array(Image.open(img_path).convert("RGB"))
+            fig, axes = plt.subplots(len(page_ids), n_cols, figsize=(4 * n_cols, 4 * len(page_ids)))
+            if len(page_ids) == 1:
+                axes = axes[np.newaxis, :]
 
-        yolo_for_img = [p for p in yolo_preds if p["image_id"] == image_id]
-        sam_for_img = [p for p in sam_preds if p["image_id"] == image_id]
+            for row, image_id in enumerate(page_ids):
+                img_path = IMAGE_DIR / f"{image_id:012d}.jpg"
+                image = np.array(Image.open(img_path).convert("RGB"))
 
-        axes[row, 0].imshow(_overlay_masks(image, yolo_for_img))
-        axes[row, 0].set_title("YOLO26-seg" if row == 0 else "")
-        axes[row, 0].axis("off")
+                axes[row, 0].imshow(image)
+                axes[row, 0].set_title("input" if row == 0 else "")
+                axes[row, 0].axis("off")
 
-        axes[row, 1].imshow(_overlay_masks(image, sam_for_img))
-        axes[row, 1].set_title("SAM3.1" if row == 0 else "")
-        axes[row, 1].axis("off")
+                for col, (name, _slug) in enumerate(QUALITATIVE_MODELS, start=1):
+                    axes[row, col].imshow(_overlay_masks(image, preds_by_image[name][image_id]))
+                    axes[row, col].set_title(name if row == 0 else "")
+                    axes[row, col].axis("off")
 
-    fig.tight_layout()
-    fig.savefig(RESULTS_DIR / "qualitative_examples.png", dpi=150)
-    plt.close(fig)
-    print(f"wrote {RESULTS_DIR / 'qualitative_examples.png'}")
+            fig.tight_layout()
+            pdf.savefig(fig)
+            plt.close(fig)
+
+    print(f"wrote {out_path} ({len(image_ids)} images, {-(-len(image_ids) // ROWS_PER_PAGE)} pages)")
 
 
 def main() -> None:

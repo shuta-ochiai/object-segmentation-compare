@@ -1,6 +1,6 @@
-"""Common inference wrappers for YOLO26-seg and SAM3.1.
+"""Common inference wrappers for YOLO26-seg, SAM3.1, and RF-DETR-Seg.
 
-Both wrappers normalize predictions to a shared format so they can be fed into
+Each wrapper normalizes predictions to a shared format so they can be fed into
 the same COCO-style evaluation and speed-benchmark code:
 
     [{"image_id": int, "category_id": int, "segmentation": RLE, "score": float}, ...]
@@ -150,6 +150,53 @@ def run_sam31(
                     "image_id": image_id,
                     "category_id": category_id,
                     "segmentation": _mask_to_rle(binary_mask),
+                    "score": float(score),
+                }
+            )
+    return predictions
+
+
+def run_rfdetr(
+    image_dir: Path | str,
+    annotations_path: Path | str,
+    conf: float = 0.25,
+    model_size: str = "Nano",
+) -> list[dict]:
+    """Run RF-DETR-Seg instance segmentation over every image in image_dir.
+
+    model_size selects the RFDETRSeg<model_size> class (Nano/Small/Medium/Large/
+    XLarge/2XLarge). Unlike YOLO26, RF-DETR's default `.predict()` already
+    returns masks at the original image resolution (verified empirically), so
+    no retina_masks-style fix is needed here.
+    """
+    import cv2
+    import rfdetr
+    from rfdetr.assets.coco_classes import COCO_CLASSES
+
+    image_dir = Path(image_dir)
+    categories = _load_coco_categories(Path(annotations_path))
+    name_to_id = {name: cid for cid, name in categories.items()}
+
+    model_cls = getattr(rfdetr, f"RFDETRSeg{model_size}")
+    model = model_cls()
+
+    predictions: list[dict] = []
+    for img_path in sorted(image_dir.glob("*.jpg")):
+        image_id = int(img_path.stem)
+        image = cv2.imread(str(img_path))
+        detections = model.predict(image, threshold=conf)
+        if detections.mask is None:
+            continue
+        for mask, cls_id, score in zip(detections.mask, detections.class_id, detections.confidence):
+            cls_name = COCO_CLASSES.get(int(cls_id))
+            category_id = name_to_id.get(cls_name)
+            if category_id is None:
+                continue
+            predictions.append(
+                {
+                    "image_id": image_id,
+                    "category_id": category_id,
+                    "segmentation": _mask_to_rle(mask.astype(np.uint8)),
                     "score": float(score),
                 }
             )
